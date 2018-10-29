@@ -111,7 +111,9 @@ instance (rep ~ BlackBox) => FromData__ rep (Luna.Value -> Luna.Value) where
         Luna.Function f -> pure f
         Luna.Thunk    a -> a >>= fromData__ @rep
         Luna.Susp     a -> a >>= fromData__ @rep
-        a -> error (show a)
+        Luna.Cons     _ -> Luna.throw "Expected a Function, got Constructor"
+        Luna.Native   _ -> Luna.throw "Expected a Function, got a native value"
+        Luna.Error    e -> Luna.throw e
 
 instance (IsNative a, RuntimeRepOf a ~ AsNative n)
       => FromData__ (AsNative n) a where

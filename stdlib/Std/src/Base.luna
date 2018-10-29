@@ -1501,6 +1501,12 @@ native class Future a:
     def awaitCatch: primAwaitFuture self
 
     def flatMap f:
-        primFlatMapFuture self f
+        self . map f . join
 
-    def toText: self.await.toText
+    def map f:
+        primMapFuture self f
+
+    def toText: "Future"
+
+    def join:
+        future (self.await.await)

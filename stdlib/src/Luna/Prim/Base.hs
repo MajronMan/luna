@@ -1,43 +1,46 @@
 module Luna.Prim.Base where
 
+import qualified Luna.IR  as IR
 import           Prologue
-import qualified Luna.IR as IR
 
-import Control.Lens (_Left)
-import qualified Control.Concurrent.Async    as Async
-import qualified Control.Exception           as Exception (evaluate)
-import qualified Control.Exception.Safe      as Exception
-import qualified Data.Aeson                  as Aeson
-import qualified Data.Bifunctor              as Bifunc
-import qualified Data.Bits                   as Bits
-import           Data.ByteString             (ByteString)
-import qualified Data.ByteString             as ByteString
-import qualified Data.ByteString.Lazy        as LazyByteString
-import           Data.Foldable               as Foldable (toList)
-import qualified Data.HashMap.Lazy           as HM
-import           Data.Map                    (Map)
-import qualified Data.Map                    as Map
-import qualified Data.Map.Internal           as IMap
-import qualified Data.Text                   as Text
-import qualified Data.Text.Encoding          as Text
-import qualified Data.Vector                 as Vector
+import qualified Control.Concurrent.Async as Async
+import qualified Control.Exception        as Exception (evaluate)
+import qualified Control.Exception.Safe   as Exception
+import           Control.Lens             (_Left)
+import qualified Data.Aeson               as Aeson
+import qualified Data.Bifunctor           as Bifunc
+import qualified Data.Bits                as Bits
+import           Data.ByteString          (ByteString)
+import qualified Data.ByteString          as ByteString
+import qualified Data.ByteString.Lazy     as LazyByteString
+import           Data.Foldable            as Foldable (toList)
+import qualified Data.HashMap.Lazy        as HM
+import           Data.Map                 (Map)
+import qualified Data.Map                 as Map
+import qualified Data.Map.Internal        as IMap
+import qualified Data.Text                as Text
+import qualified Data.Text.Encoding       as Text
+import qualified Data.Vector              as Vector
 
-import qualified Luna.Std.Builder            as Builder
-import qualified Luna.Runtime as Luna
 import qualified Luna.Pass.Sourcing.Data.Def as Def
+import qualified Luna.Runtime                as Luna
+import qualified Luna.Std.Builder            as Builder
 
-import Control.Concurrent   ( MVar, newEmptyMVar, takeMVar, readMVar, putMVar
-                            , forkFinally, killThread, threadDelay)
-import Data.Scientific      ( toRealFloat, scientific, Scientific, coefficient
-                            , base10Exponent, fromFloatDigits)
-import Data.Vector          (Vector)
-import Luna.Std.Builder     ( makeFunctionPure, makeFunctionIO, maybeLT, listLT
-                            , eitherLT, integer, int)
-import Luna.Std.Finalizers  (FinalizersCtx, registerFinalizer, cancelFinalizer)
-import System.Random        (randomIO)
-import System.Directory     (canonicalizePath)
-import System.FilePath      (pathSeparator)
-import Text.Read            (readMaybe)
+import           Control.Concurrent  (MVar, forkFinally, killThread,
+                                      newEmptyMVar, putMVar, readMVar, takeMVar,
+                                      threadDelay)
+import           Data.Scientific     (Scientific, base10Exponent, coefficient,
+                                      fromFloatDigits, scientific, toRealFloat)
+import           Data.Vector         (Vector)
+import           Luna.Std.Builder    (eitherLT, int, integer, listLT,
+                                      makeFunctionIO, makeFunctionPure, maybeLT)
+import           Luna.Std.Finalizers (FinalizersCtx, cancelFinalizer,
+                                      registerFinalizer)
+import           System.Directory    (canonicalizePath)
+import           System.FilePath     (pathSeparator)
+import qualified System.IO           as IO
+import           System.Random       (randomIO)
+import           Text.Read           (readMaybe)
 
 type Promise = Either Luna.Exception Luna.Data
 type LPromise = Either Text Luna.Data
@@ -338,7 +341,9 @@ io finalizersCtx = do
         binaryT = Builder.binaryLT
 
     let putStr :: Text -> IO ()
-        putStr = putStrLn . convert
+        putStr a = do
+            putStrLn . convert $ a
+            IO.hFlush IO.stdout
     printLn <- makeFunctionIO @graph (flip Luna.toValue putStr) [Builder.textLT] Builder.noneLT
 
     let runErrVal = flip Luna.toValue $ \(x :: Luna.Value) -> ((_Left %~ unwrap) <$> Luna.runError (Luna.force x) :: Luna.Eff (Either Text Luna.Data))
@@ -396,21 +401,19 @@ io finalizersCtx = do
                 Right val                 -> Right val
     awaitFuture' <- makeFunctionIO @graph (flip Luna.toValue awaitFutureVal) [Builder.futureLT "a"]  (Builder.eitherLT Builder.textLT "a")
 
-    let waitAndPerform ::  Future -> (Luna.Value -> Luna.Eff Luna.Data) ->IO (Promise)
+    let waitAndPerform ::  Future -> (Luna.Value -> Luna.Value) ->IO (Promise)
         waitAndPerform fut act = do
             r <- Async.wait fut
             case r of
                 Left a    -> return (Left a)
-                Right val -> do
-                    newVal <- Luna.runIO $ Luna.runError $ act $ Luna.fromData val
-                    pure newVal
+                Right val -> Luna.runIO . Luna.runError . Luna.force . act . Luna.fromData $ val
 
-    let flatMapFutureVal :: Future -> (Luna.Value -> Luna.Value) ->  IO (Future)
+    let flatMapFutureVal :: Future -> (Luna.Value -> Luna.Value) -> IO Future
         flatMapFutureVal fut act = mdo
             uid <- registerFinalizer finalizersCtx $ Async.uninterruptibleCancel a
             a <- Async.async $ (waitAndPerform fut act) `Exception.finally` cancelFinalizer finalizersCtx uid
             return a
-    flatMapFuture' <- makeFunctionIO @graph (flip Luna.toValue flatMapFutureVal) [Builder.futureLT "a", Builder.funLT "a" (Builder.futureLT "b")] (Builder.futureLT "b")
+    flatMapFuture' <- makeFunctionIO @graph (flip Luna.toValue flatMapFutureVal) [Builder.futureLT "a", Builder.funLT "a" "b"] (Builder.futureLT "b")
 
     let newEmptyMVarVal :: IO (MVar Luna.Data)
         newEmptyMVarVal = newEmptyMVar
@@ -453,7 +456,7 @@ io finalizersCtx = do
                           , ("randomReal", randomReal)
                           , ("primFuture", future')
                           , ("primAwaitFuture", awaitFuture')
-                          , ("primFlatMapFuture", flatMapFuture')
+                          , ("primMapFuture", flatMapFuture')
                           , ("primFork", fork)
                           , ("sleep", sleep)
                           , ("primNewMVar", newEmptyMVar')
