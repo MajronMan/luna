@@ -52,6 +52,9 @@ class LambdaFunction:
     def invoke payload:
         primAWSInvoke self.env self.name payload.toBinary
 
+    def invokeAsync payload:
+        future (self.invoke payload)
+
     def shortRep: shortRepDefault "LambdaFunction" self
     def toJSON:   toJSONDefault   "LambdaFunction" self
     def toText:   self.shortRep
@@ -129,6 +132,19 @@ class AWS:
                         fun  = primAWSCreateFunction self.env function.name r code
                         aws  = self.registerFunction fun
                         (aws, fun)
+
+
+    def createFunctionAsync function:
+        future (self.createFunction function)
+
+    def listFunctionsAsync:
+        future (self.listFunctions)
+
+    def lookupFunctionAsync name:
+        future (self.lookupFunction name)
+
+    def registerFunctionAsync fun:
+        future (self.registerFunction fun)
 
     def shortRep: "AWS Config Object"
 
