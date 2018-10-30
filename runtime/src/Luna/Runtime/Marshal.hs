@@ -19,6 +19,7 @@ data ClassRep = ClassRep Symbol Symbol
 
 data RuntimeRep = AsNative ClassRep
                 | AsClass  Type ClassRep
+                | BlackBox
 
 type family GetRepClassName (a :: RuntimeRep) :: Symbol where
     GetRepClassName (AsNative   ('ClassRep _ s)) = s
@@ -104,6 +105,15 @@ toObject = \imps a -> Luna.Object (moduleNameOf @a)
 
 class FromData__ (k :: RuntimeRep) a where
     fromData__ :: Luna.Data -> Luna.Eff a
+
+instance (rep ~ BlackBox) => FromData__ rep (Luna.Value -> Luna.Value) where
+    fromData__ = \case
+        Luna.Function f -> pure f
+        Luna.Thunk    a -> a >>= fromData__ @rep
+        Luna.Susp     a -> a >>= fromData__ @rep
+        Luna.Cons     _ -> Luna.throw "Expected a Function, got Constructor"
+        Luna.Native   _ -> Luna.throw "Expected a Function, got a native value"
+        Luna.Error    e -> Luna.throw e
 
 instance (IsNative a, RuntimeRepOf a ~ AsNative n)
       => FromData__ (AsNative n) a where
@@ -210,6 +220,7 @@ instance ToData a => ToValue (Luna.Eff a) where
 type instance RuntimeRepOf Integer = AsNative ('ClassRep "Std.Base" "Int")
 type instance RuntimeRepOf Double  = AsNative ('ClassRep "Std.Base" "Real")
 type instance RuntimeRepOf Text    = AsNative ('ClassRep "Std.Base" "Text")
+type instance RuntimeRepOf (Luna.Value -> Luna.Value) = BlackBox
 
 instance FromObject () where
     fromConstructor = const $ return ()

@@ -1,44 +1,50 @@
 module Luna.Prim.Base where
 
+import qualified Luna.IR  as IR
 import           Prologue
-import qualified Luna.IR as IR
 
-import Control.Lens (_Left)
-import qualified Control.Concurrent.Async    as Async
-import qualified Control.Exception           as Exception (evaluate)
-import qualified Control.Exception.Safe      as Exception
-import qualified Data.Aeson                  as Aeson
-import qualified Data.Bifunctor              as Bifunc
-import qualified Data.Bits                   as Bits
-import           Data.ByteString             (ByteString)
-import qualified Data.ByteString             as ByteString
-import qualified Data.ByteString.Lazy        as LazyByteString
-import           Data.Foldable               as Foldable (toList)
-import qualified Data.HashMap.Lazy           as HM
-import           Data.Map                    (Map)
-import qualified Data.Map                    as Map
-import qualified Data.Map.Internal           as IMap
-import qualified Data.Text                   as Text
-import qualified Data.Text.Encoding          as Text
-import qualified Data.Vector                 as Vector
+import qualified Control.Concurrent.Async as Async
+import qualified Control.Exception        as Exception (evaluate)
+import qualified Control.Exception.Safe   as Exception
+import           Control.Lens             (_Left)
+import qualified Data.Aeson               as Aeson
+import qualified Data.Bifunctor           as Bifunc
+import qualified Data.Bits                as Bits
+import           Data.ByteString          (ByteString)
+import qualified Data.ByteString          as ByteString
+import qualified Data.ByteString.Lazy     as LazyByteString
+import           Data.Foldable            as Foldable (toList)
+import qualified Data.HashMap.Lazy        as HM
+import           Data.Map                 (Map)
+import qualified Data.Map                 as Map
+import qualified Data.Map.Internal        as IMap
+import qualified Data.Text                as Text
+import qualified Data.Text.Encoding       as Text
+import qualified Data.Vector              as Vector
 
-import qualified Luna.Std.Builder            as Builder
-import qualified Luna.Runtime as Luna
 import qualified Luna.Pass.Sourcing.Data.Def as Def
+import qualified Luna.Runtime                as Luna
+import qualified Luna.Std.Builder            as Builder
 
-import Control.Concurrent   ( MVar, newEmptyMVar, takeMVar, readMVar, putMVar
-                            , forkFinally, killThread, threadDelay)
-import Data.Scientific      ( toRealFloat, scientific, Scientific, coefficient
-                            , base10Exponent, fromFloatDigits)
-import Data.Vector          (Vector)
-import Luna.Std.Builder     ( makeFunctionPure, makeFunctionIO, maybeLT, listLT
-                            , eitherLT, integer, int)
-import Luna.Std.Finalizers  (FinalizersCtx, registerFinalizer, cancelFinalizer)
-import System.Random        (randomIO)
-import System.Directory     (canonicalizePath)
-import System.FilePath      (pathSeparator)
-import Text.Read            (readMaybe)
+import           Control.Concurrent  (MVar, forkFinally, killThread,
+                                      newEmptyMVar, putMVar, readMVar, takeMVar,
+                                      threadDelay)
+import           Data.Scientific     (Scientific, base10Exponent, coefficient,
+                                      fromFloatDigits, scientific, toRealFloat)
+import           Data.Vector         (Vector)
+import           Luna.Std.Builder    (eitherLT, int, integer, listLT,
+                                      makeFunctionIO, makeFunctionPure, maybeLT)
+import           Luna.Std.Finalizers (FinalizersCtx, cancelFinalizer,
+                                      registerFinalizer)
+import           System.Directory    (canonicalizePath)
+import           System.FilePath     (pathSeparator)
+import qualified System.IO           as IO
+import           System.Random       (randomIO)
+import           Text.Read           (readMaybe)
 
+type Promise = Either Luna.Exception Luna.Data
+type LPromise = Either Text Luna.Data
+type Future = Async.Async Promise
 
 primReal :: forall graph m. Builder.StdBuilder graph m => m (Map IR.Name Def.Def)
 primReal = do
@@ -228,8 +234,8 @@ primBinary = do
     eq <- makeFunctionPure @graph eqVal [Builder.binaryLT, Builder.binaryLT] Builder.boolLT
     plus <- makeFunctionPure @graph plusVal [Builder.binaryLT, Builder.binaryLT] Builder.binaryLT
     len <- makeFunctionPure @graph lenVal [Builder.binaryLT] Builder.intLT
-    take <- makeFunctionPure @graph takeVal [Builder.binaryLT] Builder.binaryLT
-    drop <- makeFunctionPure @graph dropVal [Builder.binaryLT] Builder.binaryLT
+    take <- makeFunctionPure @graph takeVal [Builder.binaryLT, Builder.intLT] Builder.binaryLT
+    drop <- makeFunctionPure @graph dropVal [Builder.binaryLT, Builder.intLT] Builder.binaryLT
     concat <- makeFunctionPure @graph concatVal [Builder.listLT Builder.binaryLT] Builder.binaryLT
     return $ Map.fromList [ ("primBinaryToText",   toText)
                           , ("primBinaryEquals",   eq)
@@ -320,7 +326,7 @@ operators = do
     uminusHdr <- Builder.makeUnaryMinusType @graph
     let uminus = Def.Precompiled $ Def.PrecompiledDef uminusVal uminusHdr
 
-    return $ Map.fromList [ ("if.then.else", iff)
+    return $ Map.fromList [ ("if_then_else", iff)
                           , (Builder.uminusFunName, uminus)
                           ]
 
@@ -335,7 +341,9 @@ io finalizersCtx = do
         binaryT = Builder.binaryLT
 
     let putStr :: Text -> IO ()
-        putStr = putStrLn . convert
+        putStr a = do
+            putStrLn . convert $ a
+            IO.hFlush IO.stdout
     printLn <- makeFunctionIO @graph (flip Luna.toValue putStr) [Builder.textLT] Builder.noneLT
 
     let runErrVal = flip Luna.toValue $ \(x :: Luna.Value) -> ((_Left %~ unwrap) <$> Luna.runError (Luna.force x) :: Luna.Eff (Either Text Luna.Data))
@@ -377,6 +385,36 @@ io finalizersCtx = do
             return ()
     fork <- makeFunctionIO @graph (flip Luna.toValue forkVal) [noneT] noneT
 
+    let futureVal :: Luna.Eff Luna.Data -> IO (Future)
+        futureVal act = mdo
+            uid <- registerFinalizer finalizersCtx $ Async.uninterruptibleCancel a
+            a <- Async.async $ (Luna.runIO $ Luna.runError act) `Exception.finally` cancelFinalizer finalizersCtx uid
+            return a
+
+    future' <- makeFunctionIO @graph (flip Luna.toValue futureVal) ["a"] (Builder.futureLT "a")
+
+    let awaitFutureVal :: Future -> IO (LPromise)
+        awaitFutureVal fut = do
+            res <- Async.wait fut
+            return $ case res of
+                Left (Luna.Exception msg) -> Left msg
+                Right val                 -> Right val
+    awaitFuture' <- makeFunctionIO @graph (flip Luna.toValue awaitFutureVal) [Builder.futureLT "a"]  (Builder.eitherLT Builder.textLT "a")
+
+    let waitAndPerform ::  Future -> (Luna.Value -> Luna.Value) ->IO (Promise)
+        waitAndPerform fut act = do
+            r <- Async.wait fut
+            case r of
+                Left a    -> return (Left a)
+                Right val -> Luna.runIO . Luna.runError . Luna.force . act . Luna.fromData $ val
+
+    let flatMapFutureVal :: Future -> (Luna.Value -> Luna.Value) -> IO Future
+        flatMapFutureVal fut act = mdo
+            uid <- registerFinalizer finalizersCtx $ Async.uninterruptibleCancel a
+            a <- Async.async $ (waitAndPerform fut act) `Exception.finally` cancelFinalizer finalizersCtx uid
+            return a
+    flatMapFuture' <- makeFunctionIO @graph (flip Luna.toValue flatMapFutureVal) [Builder.futureLT "a", Builder.funLT "a" "b"] (Builder.futureLT "b")
+
     let newEmptyMVarVal :: IO (MVar Luna.Data)
         newEmptyMVarVal = newEmptyMVar
     newEmptyMVar' <- makeFunctionIO @graph (flip Luna.toValue newEmptyMVarVal) [] (Builder.mvarLT "a")
@@ -416,6 +454,9 @@ io finalizersCtx = do
                           , ("parseJSON", parseJSON)
                           , ("renderJSON", renderJSON)
                           , ("randomReal", randomReal)
+                          , ("primFuture", future')
+                          , ("primAwaitFuture", awaitFuture')
+                          , ("primMapFuture", flatMapFuture')
                           , ("primFork", fork)
                           , ("sleep", sleep)
                           , ("primNewMVar", newEmptyMVar')
