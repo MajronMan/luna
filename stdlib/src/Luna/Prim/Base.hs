@@ -388,7 +388,7 @@ io finalizersCtx = do
     let futureVal :: Luna.Eff Luna.Data -> IO (Future)
         futureVal act = mdo
             uid <- registerFinalizer finalizersCtx $ Async.uninterruptibleCancel a
-            a <- Async.async $ (Luna.runIO $ Luna.runError act) `Exception.finally` cancelFinalizer finalizersCtx uid
+            a <- Async.async $ (Luna.runIO . Luna.runError . Luna.force $ act) `Exception.finally` cancelFinalizer finalizersCtx uid
             return a
 
     future' <- makeFunctionIO @graph (flip Luna.toValue futureVal) ["a"] (Builder.futureLT "a")
